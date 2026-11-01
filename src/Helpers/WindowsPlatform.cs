@@ -7,7 +7,9 @@ namespace Loupedeck.AntigravityControllerPlugin.Helpers
     using System.Linq;
     using System.Runtime.InteropServices;
     using System.Runtime.Versioning;
+    using System.Text;
     using System.Threading;
+    using Microsoft.Win32;
 
     // Windows counterparts of the macOS tools the plugin uses (ps, lsof, open -a, osascript keystrokes, sqlite3)
     [SupportedOSPlatform("windows")]
@@ -117,6 +119,7 @@ namespace Loupedeck.AntigravityControllerPlugin.Helpers
         // ---------------------------------------------------------------- Listening ports (lsof)
 
         private const Int32 AfInet = 2;
+        private const Int32 AfInet6 = 23;
         private const Int32 TcpTableOwnerPidListener = 3;
 
         [StructLayout(LayoutKind.Sequential)]
@@ -130,51 +133,99 @@ namespace Loupedeck.AntigravityControllerPlugin.Helpers
             public UInt32 OwningPid;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MibTcp6RowOwnerPid
+        {
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)]
+            public Byte[] LocalAddr;
+            public UInt32 LocalScopeId;
+            public UInt32 LocalPort;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)]
+            public Byte[] RemoteAddr;
+            public UInt32 RemoteScopeId;
+            public UInt32 RemotePort;
+            public UInt32 State;
+            public UInt32 OwningPid;
+        }
+
         [DllImport("iphlpapi.dll", SetLastError = true)]
         private static extern UInt32 GetExtendedTcpTable(IntPtr pTcpTable, ref Int32 dwOutBufLen, Boolean sort,
             Int32 ipVersion, Int32 tblClass, UInt32 reserved);
 
-        // IPv4 TCP ports the process listens on
+        // TCP ports (IPv4 and IPv6) the process listens on
         public static List<Int32> GetListeningPorts(Int32 pid)
         {
-            var ports = new List<Int32>();
+            var ports = new HashSet<Int32>();
+
+            // IPv4
             var size = 0;
             GetExtendedTcpTable(IntPtr.Zero, ref size, false, AfInet, TcpTableOwnerPidListener, 0);
-
-            var buffer = Marshal.AllocHGlobal(size);
-            try
+            if (size > 0)
             {
-                if (GetExtendedTcpTable(buffer, ref size, false, AfInet, TcpTableOwnerPidListener, 0) != 0)
+                var buffer = Marshal.AllocHGlobal(size);
+                try
                 {
-                    return ports;
-                }
-
-                var count = Marshal.ReadInt32(buffer);
-                var rowPtr = buffer + 4;
-                var rowSize = Marshal.SizeOf<MibTcpRowOwnerPid>();
-                for (var i = 0; i < count; i++, rowPtr += rowSize)
-                {
-                    var row = Marshal.PtrToStructure<MibTcpRowOwnerPid>(rowPtr);
-                    if (row.OwningPid == pid)
+                    if (GetExtendedTcpTable(buffer, ref size, false, AfInet, TcpTableOwnerPidListener, 0) == 0)
                     {
-                        // Port is in network byte order in the low 16 bits
-                        ports.Add((Int32)(((row.LocalPort & 0xFF) << 8) | ((row.LocalPort >> 8) & 0xFF)));
+                        var count = Marshal.ReadInt32(buffer);
+                        var rowPtr = buffer + 4;
+                        var rowSize = Marshal.SizeOf<MibTcpRowOwnerPid>();
+                        for (var i = 0; i < count; i++, rowPtr += rowSize)
+                        {
+                            var row = Marshal.PtrToStructure<MibTcpRowOwnerPid>(rowPtr);
+                            if (row.OwningPid == pid)
+                            {
+                                // Port is in network byte order in the low 16 bits
+                                ports.Add((Int32)(((row.LocalPort & 0xFF) << 8) | ((row.LocalPort >> 8) & 0xFF)));
+                            }
+                        }
                     }
                 }
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(buffer);
+                finally
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
             }
 
-            return ports;
+            // IPv6
+            size = 0;
+            GetExtendedTcpTable(IntPtr.Zero, ref size, false, AfInet6, TcpTableOwnerPidListener, 0);
+            if (size > 0)
+            {
+                var buffer = Marshal.AllocHGlobal(size);
+                try
+                {
+                    if (GetExtendedTcpTable(buffer, ref size, false, AfInet6, TcpTableOwnerPidListener, 0) == 0)
+                    {
+                        var count = Marshal.ReadInt32(buffer);
+                        var rowPtr = buffer + 4;
+                        var rowSize = Marshal.SizeOf<MibTcp6RowOwnerPid>();
+                        for (var i = 0; i < count; i++, rowPtr += rowSize)
+                        {
+                            var row = Marshal.PtrToStructure<MibTcp6RowOwnerPid>(rowPtr);
+                            if (row.OwningPid == pid)
+                            {
+                                ports.Add((Int32)(((row.LocalPort & 0xFF) << 8) | ((row.LocalPort >> 8) & 0xFF)));
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
+            }
+
+            return ports.OrderBy(p => p).ToList();
         }
 
         // ---------------------------------------------------------------- Windows (open -a, lsappinfo)
 
+        private const Int32 SwShow = 5;
         private const Int32 SwRestore = 9;
         private const Byte VkMenu = 0x12;
         private const UInt32 KeyEventFKeyUp = 0x0002;
+        private const UInt32 GaRoot = 2;
 
         [DllImport("user32.dll")]
         private static extern Boolean SetForegroundWindow(IntPtr hWnd);
@@ -183,16 +234,64 @@ namespace Loupedeck.AntigravityControllerPlugin.Helpers
         private static extern Boolean ShowWindow(IntPtr hWnd, Int32 nCmdShow);
 
         [DllImport("user32.dll")]
+        private static extern Boolean BringWindowToTop(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
         private static extern Boolean IsIconic(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern Boolean IsWindowVisible(IntPtr hWnd);
 
         [DllImport("user32.dll")]
         private static extern void keybd_event(Byte bVk, Byte bScan, UInt32 dwFlags, UIntPtr dwExtraInfo);
 
-        // appName is both the process name and the install folder, e.g. %LOCALAPPDATA%\Programs\Antigravity IDE\Antigravity IDE.exe
-        public static Boolean HasOpenWindow(String appName) => FindMainWindow(appName) != IntPtr.Zero;
-
         [DllImport("user32.dll")]
         private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetAncestor(IntPtr hWnd, UInt32 gaFlags);
+
+        [DllImport("user32.dll")]
+        private static extern UInt32 GetWindowThreadProcessId(IntPtr hWnd, out UInt32 lpdwProcessId);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern Int32 GetClassName(IntPtr hWnd, StringBuilder lpClassName, Int32 nMaxCount);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern Boolean GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT
+        {
+            public Int32 Left;
+            public Int32 Top;
+            public Int32 Right;
+            public Int32 Bottom;
+        }
+
+        private delegate Boolean EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern Boolean EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr OpenInputDesktop(UInt32 dwFlags, Boolean fInherit, UInt32 dwDesiredAccess);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern Boolean SetThreadDesktop(IntPtr hDesktop);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern Boolean CloseDesktop(IntPtr hDesktop);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetThreadDesktop(UInt32 dwThreadId);
+
+        [DllImport("kernel32.dll")]
+        private static extern UInt32 GetCurrentThreadId();
+
+        // appName is both the process name and the install folder, e.g. %LOCALAPPDATA%\Programs\Antigravity IDE\Antigravity IDE.exe
+        public static Boolean HasOpenWindow(String appName) => FindMainWindow(appName) != IntPtr.Zero;
 
         // Brings the app's main window to the front, or starts the app when it is not running.
         // Returns the window, or IntPtr.Zero when the app had to be started (no window yet)
@@ -209,6 +308,12 @@ namespace Loupedeck.AntigravityControllerPlugin.Helpers
             {
                 ShowWindow(hWnd, SwRestore);
             }
+            else
+            {
+                ShowWindow(hWnd, SwShow);
+            }
+
+            BringWindowToTop(hWnd);
 
             // Windows only lets the process that received the last input change the foreground window;
             // a synthetic Alt press lifts that restriction for the Logi Plugin Service
@@ -218,31 +323,146 @@ namespace Loupedeck.AntigravityControllerPlugin.Helpers
             return hWnd;
         }
 
-        private static IntPtr FindMainWindow(String appName)
+        public static IntPtr FindMainWindow(String appName)
         {
-            foreach (var p in Process.GetProcessesByName(appName))
+            var origDesk = GetThreadDesktop(GetCurrentThreadId());
+            var inputDesk = OpenInputDesktop(0, false, 0x01FF);
+            var switched = false;
+            if (inputDesk != IntPtr.Zero && inputDesk != origDesk)
             {
-                using (p)
+                switched = SetThreadDesktop(inputDesk);
+            }
+
+            try
+            {
+                var pids = new HashSet<Int32>();
+                foreach (var p in Process.GetProcessesByName(appName))
                 {
-                    if (p.MainWindowHandle != IntPtr.Zero)
+                    using (p)
                     {
-                        return p.MainWindowHandle;
+                        if (p.MainWindowHandle != IntPtr.Zero && (IsWindowVisible(p.MainWindowHandle) || IsIconic(p.MainWindowHandle)))
+                        {
+                            GetWindowRect(p.MainWindowHandle, out var rect);
+                            if (rect.Right - rect.Left > 100 && rect.Bottom - rect.Top > 100)
+                            {
+                                return p.MainWindowHandle;
+                            }
+                        }
+                        pids.Add(p.Id);
                     }
                 }
+
+                if (pids.Count == 0)
+                {
+                    return IntPtr.Zero;
+                }
+
+                // Electron / Chromium apps often have MainWindowHandle == 0 on the parent process
+                // while an active Chrome_WidgetWin_1 window exists on one of its child processes or threads.
+                IntPtr best = IntPtr.Zero;
+                EnumWindows((hWnd, lParam) =>
+                {
+                    GetWindowThreadProcessId(hWnd, out var pid);
+                    if (pids.Contains((Int32)pid))
+                    {
+                        var sbClass = new StringBuilder(256);
+                        GetClassName(hWnd, sbClass, 256);
+                        var className = sbClass.ToString();
+
+                        if (className == "Chrome_WidgetWin_0" || className == "Electron_NotifyIconHostWindow" ||
+                            className.Contains("IME") || className.Contains("PowerMessage"))
+                        {
+                            return true;
+                        }
+
+                        if (IsWindowVisible(hWnd) || IsIconic(hWnd))
+                        {
+                            GetWindowRect(hWnd, out var rect);
+                            var w = rect.Right - rect.Left;
+                            var h = rect.Bottom - rect.Top;
+                            if (w > 100 && h > 100)
+                            {
+                                best = hWnd;
+                                return false; // Found main window
+                            }
+                        }
+                    }
+                    return true;
+                }, IntPtr.Zero);
+
+                return best;
             }
-            return IntPtr.Zero;
+            finally
+            {
+                if (switched && origDesk != IntPtr.Zero)
+                {
+                    SetThreadDesktop(origDesk);
+                }
+                if (inputDesk != IntPtr.Zero)
+                {
+                    CloseDesktop(inputDesk);
+                }
+            }
         }
 
         private static void StartApp(String appName)
         {
-            var exe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Programs", appName, appName + ".exe");
-            if (!File.Exists(exe))
+            var exe = ResolveAppExecutable(appName);
+            if (exe == null)
             {
-                PluginLog.Warning($"[Windows] {appName} is not running and {exe} was not found");
+                PluginLog.Warning($"[Windows] {appName} is not running and executable was not found");
                 return;
             }
-            Process.Start(new ProcessStartInfo { FileName = exe, UseShellExecute = true })?.Dispose();
+            try
+            {
+                Process.Start(new ProcessStartInfo { FileName = exe, UseShellExecute = true })?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning($"[Windows] Failed to start {exe}: {ex.Message}");
+            }
+        }
+
+        private static String ResolveAppExecutable(String appName)
+        {
+            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+
+            var candidates = new List<String>
+            {
+                Path.Combine(localAppData, "Programs", appName, appName + ".exe"),
+                Path.Combine(localAppData, "Programs", appName.ToLowerInvariant(), appName + ".exe"),
+                Path.Combine(programFiles, appName, appName + ".exe"),
+                Path.Combine(programFilesX86, appName, appName + ".exe"),
+                Path.Combine(programFiles, "Google", appName, appName + ".exe"),
+                Path.Combine(localAppData, "Google", appName, appName + ".exe")
+            };
+
+            foreach (var candidate in candidates)
+            {
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+
+            // Check Windows Registry App Paths
+            try
+            {
+                using var key = Registry.CurrentUser.OpenSubKey($@"Software\Microsoft\Windows\CurrentVersion\App Paths\{appName}.exe")
+                             ?? Registry.LocalMachine.OpenSubKey($@"Software\Microsoft\Windows\CurrentVersion\App Paths\{appName}.exe");
+                var path = key?.GetValue("") as String;
+                if (!String.IsNullOrEmpty(path) && File.Exists(path))
+                {
+                    return path;
+                }
+            }
+            catch
+            {
+            }
+
+            return null;
         }
 
         // ---------------------------------------------------------------- Keystrokes (osascript keystroke)
@@ -261,7 +481,7 @@ namespace Loupedeck.AntigravityControllerPlugin.Helpers
             public IntPtr ExtraInfo;
         }
 
-        // INPUT is a union; the mouse variant is the largest member and sets the struct size
+        // INPUT is a union; 40 bytes on 64-bit Windows, 28 bytes on 32-bit Windows
         [StructLayout(LayoutKind.Explicit, Size = 40)]
         private struct Input
         {
@@ -284,16 +504,23 @@ namespace Loupedeck.AntigravityControllerPlugin.Helpers
             }
 
             var waited = 0;
-            while (GetForegroundWindow() != hWnd && waited < 1000)
+            while (waited < 1000)
             {
+                var fg = GetForegroundWindow();
+                if (fg == hWnd || (fg != IntPtr.Zero && GetAncestor(fg, GaRoot) == hWnd))
+                {
+                    break;
+                }
                 Thread.Sleep(50);
                 waited += 50;
             }
-            if (GetForegroundWindow() != hWnd)
+
+            var currentFg = GetForegroundWindow();
+            if (currentFg != hWnd && (currentFg == IntPtr.Zero || GetAncestor(currentFg, GaRoot) != hWnd))
             {
                 return false;
             }
-            Thread.Sleep(150); // let the window take the keyboard focus
+            Thread.Sleep(150); // let the window take keyboard focus
 
             var vk = (UInt16)Char.ToUpperInvariant(key);
             var inputs = new[]
@@ -301,7 +528,18 @@ namespace Loupedeck.AntigravityControllerPlugin.Helpers
                 KeyInput(VkControl, false), KeyInput(VkShift, false), KeyInput(vk, false),
                 KeyInput(vk, true), KeyInput(VkShift, true), KeyInput(VkControl, true)
             };
-            SendInput((UInt32)inputs.Length, inputs, Marshal.SizeOf<Input>());
+
+            var sent = SendInput((UInt32)inputs.Length, inputs, Marshal.SizeOf<Input>());
+            if (sent == 0)
+            {
+                // UIPI fallback via keybd_event
+                keybd_event((Byte)VkControl, 0, 0, UIntPtr.Zero);
+                keybd_event((Byte)VkShift, 0, 0, UIntPtr.Zero);
+                keybd_event((Byte)vk, 0, 0, UIntPtr.Zero);
+                keybd_event((Byte)vk, 0, KeyEventFKeyUp, UIntPtr.Zero);
+                keybd_event((Byte)VkShift, 0, KeyEventFKeyUp, UIntPtr.Zero);
+                keybd_event((Byte)VkControl, 0, KeyEventFKeyUp, UIntPtr.Zero);
+            }
             return true;
         }
 
@@ -318,6 +556,9 @@ namespace Loupedeck.AntigravityControllerPlugin.Helpers
 
         [DllImport(WinSqlite, CallingConvention = CallingConvention.StdCall)]
         private static extern Int32 sqlite3_open_v2([MarshalAs(UnmanagedType.LPUTF8Str)] String filename, out IntPtr db, Int32 flags, IntPtr vfs);
+
+        [DllImport(WinSqlite, CallingConvention = CallingConvention.StdCall)]
+        private static extern Int32 sqlite3_busy_timeout(IntPtr db, Int32 ms);
 
         [DllImport(WinSqlite, CallingConvention = CallingConvention.StdCall)]
         private static extern Int32 sqlite3_close(IntPtr db);
@@ -349,6 +590,8 @@ namespace Loupedeck.AntigravityControllerPlugin.Helpers
 
             try
             {
+                sqlite3_busy_timeout(db, 2000);
+
                 if (sqlite3_prepare_v2(db, sql, -1, out var stmt, IntPtr.Zero) != SqliteOk)
                 {
                     return rows;

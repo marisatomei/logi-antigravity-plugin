@@ -944,9 +944,17 @@ namespace Loupedeck.AntigravityControllerPlugin.Services
                     if (idx >= 0)
                     {
                         var rest = content.Substring(idx + "Active Workspaces:".Length);
-                        var end = rest.IndexOfAny(new[] { '\r', '\n' });
-                        var name = FolderName((end > 0 ? rest.Substring(0, end) : rest).Trim().TrimStart('-'));
-                        if (name != null) return name;
+                        var linesAfter = rest.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                        foreach (var l in linesAfter)
+                        {
+                            var trimmed = l.Trim().TrimStart('-', ' ').Trim();
+                            if (trimmed.Length > 0 && !trimmed.StartsWith("Command Working Directory", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var name = FolderName(trimmed);
+                                if (name != null) return name;
+                                break;
+                            }
+                        }
                     }
                 }
                 catch (JsonException)
@@ -989,12 +997,36 @@ namespace Loupedeck.AntigravityControllerPlugin.Services
         private static String CleanWorkspacePath(String raw)
         {
             if (String.IsNullOrWhiteSpace(raw)) return "";
-            var s = raw.Trim().TrimStart('[', '"', '\'').TrimEnd(']', '"', '\'').Trim();
+            var s = raw.Trim();
+            if (s.StartsWith("["))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(s);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Array)
+                    {
+                        var first = doc.RootElement.EnumerateArray().FirstOrDefault();
+                        if (first.ValueKind == JsonValueKind.String)
+                        {
+                            s = first.GetString() ?? "";
+                        }
+                    }
+                }
+                catch
+                {
+                }
+            }
+            s = s.Trim().TrimStart('"', '\'').TrimEnd('"', '\'').Trim();
             if (s.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
             {
                 s = s.Substring(7);
             }
-            return Uri.UnescapeDataString(s).TrimEnd('/', '\\');
+            s = Uri.UnescapeDataString(s).TrimEnd('/', '\\');
+            if (s.Length >= 3 && s[0] == '/' && Char.IsLetter(s[1]) && s[2] == ':')
+            {
+                s = s.Substring(1);
+            }
+            return s;
         }
 
 

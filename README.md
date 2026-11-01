@@ -23,18 +23,54 @@ agent sessions to the **Logitech MX Creative Keypad** (macOS and Windows).
 
 Works with both the Antigravity app and Antigravity IDE.
 
+## Installation
+
+### Windows
+
+The fastest way to install or update the plugin on Windows is using the automated installer script:
+
+```powershell
+# In PowerShell:
+.\install.ps1
+```
+
+Or simply double-click `install.cmd` in File Explorer.
+
+The script checks for the .NET SDK and `logiplugintool`, builds the Release package, packs `AntigravityController.lplug4`, verifies it, and installs it directly into the Logi Plugin Service directory (`%LOCALAPPDATA%\Logi\LogiPluginService\Plugins\AntigravityController`).
+
+#### Manual Installation (Windows)
+
+1. Ensure `logiplugintool` is installed:
+   ```powershell
+   dotnet tool install --global logiplugintool
+   ```
+2. Build and pack:
+   ```powershell
+   dotnet build -c Release src
+   logiplugintool pack bin\Release AntigravityController.lplug4
+   logiplugintool verify AntigravityController.lplug4
+   ```
+3. Install the package:
+   ```powershell
+   logiplugintool install AntigravityController.lplug4
+   ```
+
+### macOS
+
+Double-click the packaged `AntigravityController.lplug4` file to install it with Logi Options+, or use `logiplugintool install AntigravityController.lplug4`.
+
 ## Requirements
 
-- macOS, or Windows 10/11
+- macOS 12+, or Windows 10/11
 - Logi Options+ with the Logi Plugin Service (version 6.0 or later)
 - Logitech MX Creative Keypad
 - Antigravity and/or Antigravity IDE
 
 ### Permissions
 
-**New Conversation** sends Antigravity's own shortcut (Cmd+Shift+L). macOS asks once to allow this:
-*System Settings → Privacy & Security → Accessibility → enable "Logi Plugin Service"*.
-On Windows it sends Ctrl+Shift+L and needs no extra permission.
+**New Conversation** sends Antigravity's own shortcut (`Cmd+Shift+L` on macOS, `Ctrl+Shift+L` on Windows).
+- On macOS: Enable access under *System Settings → Privacy & Security → Accessibility → Logi Plugin Service*.
+- On Windows: No extra permissions required (supports automated UIPI keyboard fallback).
 All other actions work without extra permissions.
 
 ## Privacy
@@ -61,11 +97,11 @@ Requires the .NET SDK and Logi Options+ (the build references `PluginApi.dll` fr
 
 ```bash
 dotnet build -c Release src
-logiplugintool pack bin/Release AntigravityController_1_2.lplug4
-logiplugintool verify AntigravityController_1_2.lplug4
+logiplugintool pack bin/Release AntigravityController.lplug4
+logiplugintool verify AntigravityController.lplug4
 ```
 
-A Debug build registers the plugin with the Logi Plugin Service for development.
+A Debug build automatically registers a link with the Logi Plugin Service for development and reloads it.
 
 ## License
 

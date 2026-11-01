@@ -80,9 +80,11 @@ namespace Loupedeck.AntigravityControllerPlugin.Services
         public Boolean HasOpenWindow(AntigravityHost host)
         {
             var servers = this.GetServers();
-            return host == AntigravityHost.Ide
-                ? servers.Any(s => s.Host == AntigravityHost.Ide && s.ServesEditorWindow)
-                : servers.Any(s => s.Host == AntigravityHost.App) && this._appInForeground;
+            if (host == AntigravityHost.Ide)
+            {
+                return servers.Any(s => s.Host == AntigravityHost.Ide && (s.ServesEditorWindow || (OperatingSystem.IsWindows() && WindowsPlatform.HasOpenWindow("Antigravity IDE"))));
+            }
+            return servers.Any(s => s.Host == AntigravityHost.App) && (OperatingSystem.IsWindows() ? WindowsPlatform.HasOpenWindow("Antigravity") : this._appInForeground);
         }
 
         // ---------------------------------------------------------------- Quota

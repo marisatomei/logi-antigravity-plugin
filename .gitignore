@@ -400,3 +400,6 @@ FodyWeavers.xsd
 .DS_Store
 # Local NuGet cache
 .local/
+
+# Logi Plugin packages
+*.lplug4
