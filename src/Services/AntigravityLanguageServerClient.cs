@@ -4,6 +4,7 @@ namespace Loupedeck.AntigravityControllerPlugin.Services
     using System.Collections.Generic;
     using System.Diagnostics;
     using System.Globalization;
+    using System.IO;
     using System.Linq;
     using System.Net.Http;
     using System.Text;
@@ -665,7 +666,7 @@ namespace Loupedeck.AntigravityControllerPlugin.Services
             using var stream = resp.Content.ReadAsStream();
             if (!resp.IsSuccessStatusCode)
             {
-                using var reader = new System.IO.StreamReader(stream);
+                using var reader = new StreamReader(stream);
                 PluginLog.Warning($"[LanguageServer] {method} returned {(Int32)resp.StatusCode}: {reader.ReadToEnd()}");
                 return null;
             }
@@ -728,19 +729,20 @@ namespace Loupedeck.AntigravityControllerPlugin.Services
         // Reuses a known server or probes the ports of a new language_server process
         private LanguageServerConnection ParseServer(String line)
         {
-            if (!line.Contains("language_server") || !line.Contains("--csrf_token"))
+            if (!line.Contains("language_server", StringComparison.OrdinalIgnoreCase))
             {
                 return null;
             }
 
-            var csrf = Regex.Match(line, @"--csrf_token\s+([a-zA-Z0-9\-]+)").Groups[1].Value;
             var pidText = line.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
-            if (String.IsNullOrEmpty(csrf) || !Int32.TryParse(pidText, out var pid))
+            if (!Int32.TryParse(pidText, out var pid))
             {
                 return null;
             }
 
-            var known = this._servers.FirstOrDefault(s => s.Pid == pid && s.Csrf == csrf);
+            var csrf = Regex.Match(line, @"--csrf_token[\s=]+([a-zA-Z0-9\-]+)").Groups[1].Value;
+
+            var known = this._servers.FirstOrDefault(s => s.Pid == pid && (String.IsNullOrEmpty(csrf) || s.Csrf == csrf));
             if (known != null)
             {
                 return known;
@@ -748,16 +750,17 @@ namespace Loupedeck.AntigravityControllerPlugin.Services
 
             var host = line.Contains("Antigravity IDE.app", StringComparison.OrdinalIgnoreCase)
                 || line.Contains(@"\Antigravity IDE\", StringComparison.OrdinalIgnoreCase)
-                || line.Contains("--app_data_dir antigravity-ide")
+                || Regex.IsMatch(line, @"--app_data_dir[\s=]+antigravity-ide\b", RegexOptions.IgnoreCase)
                 ? AntigravityHost.Ide
                 : AntigravityHost.App;
 
-            var ports = OperatingSystem.IsWindows()
-                ? WindowsPlatform.GetListeningPorts(pid)
-                : Regex.Matches(RunTool("lsof", $"-a -p {pid} -iTCP -sTCP:LISTEN -P -n"), @":(\d+)\s+\(LISTEN\)")
-                    .Select(m => Int32.Parse(m.Groups[1].Value))
-                    .ToList();
-            foreach (var port in ports)
+            Int32? daemonPort = null;
+            if (String.IsNullOrEmpty(csrf) && (!TryReadDaemonInfo(line, host, pid, out csrf, out daemonPort) || String.IsNullOrEmpty(csrf)))
+            {
+                return null;
+            }
+
+            LanguageServerConnection TryConnect(Int32 port)
             {
                 try
                 {
@@ -779,9 +782,92 @@ namespace Loupedeck.AntigravityControllerPlugin.Services
                 {
                     // Not the Connect-RPC port, try the next one
                 }
+
+                return null;
+            }
+
+            if (daemonPort is > 0)
+            {
+                var connected = TryConnect(daemonPort.Value);
+                if (connected != null)
+                {
+                    return connected;
+                }
+            }
+
+            var ports = OperatingSystem.IsWindows()
+                ? WindowsPlatform.GetListeningPorts(pid)
+                : Regex.Matches(RunTool("lsof", $"-a -p {pid} -iTCP -sTCP:LISTEN -P -n"), @":(\d+)\s+\(LISTEN\)")
+                    .Select(m => Int32.Parse(m.Groups[1].Value))
+                    .ToList();
+            foreach (var port in ports)
+            {
+                if (daemonPort.HasValue && port == daemonPort.Value)
+                {
+                    continue;
+                }
+
+                var connected = TryConnect(port);
+                if (connected != null)
+                {
+                    return connected;
+                }
             }
 
             return null;
+        }
+
+        // Antigravity 2.35+ omits --csrf_token from CLI args and writes discovery metadata to ~/.gemini/<app_data_dir>/daemon/*.json
+        private static Boolean TryReadDaemonInfo(String commandLine, AntigravityHost host, Int32 pid, out String csrf, out Int32? httpsPort)
+        {
+            csrf = "";
+            httpsPort = null;
+
+            var match = Regex.Match(commandLine, @"--app_data_dir[\s=]+(?<dir>""[^""]+""|[^\s]+)", RegexOptions.IgnoreCase);
+            var appDataDir = match.Success
+                ? match.Groups["dir"].Value.Trim('"')
+                : (host == AntigravityHost.Ide ? "antigravity-ide" : "antigravity");
+
+            var daemonDir = Path.IsPathRooted(appDataDir)
+                ? Path.Combine(appDataDir, "daemon")
+                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini", appDataDir, "daemon");
+
+            if (!Directory.Exists(daemonDir))
+            {
+                return false;
+            }
+
+            foreach (var file in new DirectoryInfo(daemonDir).EnumerateFiles("*.json").OrderByDescending(f => f.LastWriteTimeUtc))
+            {
+                try
+                {
+                    using var stream = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    using var doc = JsonDocument.Parse(stream);
+                    var root = doc.RootElement;
+
+                    if (ReadInt64(root, "pid", -1) != pid)
+                    {
+                        continue;
+                    }
+
+                    var token = GetString(root, "csrfToken");
+                    if (String.IsNullOrEmpty(token))
+                    {
+                        continue;
+                    }
+
+                    var port = (Int32)ReadInt64(root, "httpsPort", 0);
+                    csrf = token;
+                    httpsPort = port > 0 ? port : null;
+                    return true;
+                }
+                catch
+                {
+                    // Ignore unreadable or partially written daemon files
+                }
+            }
+
+            return false;
         }
 
         // ---------------------------------------------------------------- Helpers
